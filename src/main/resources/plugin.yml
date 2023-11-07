@@ -1,0 +1,8 @@
+name: PlayerStats
+version: '${project.version}'
+main: com.skidaux.playerstats.PlayerStats
+api-version: '1.20'
+commands:
+  db-save:
+    description: Save batched data to the database
+    usage: /<command>
