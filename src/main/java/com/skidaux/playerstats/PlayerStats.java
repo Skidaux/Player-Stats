@@ -96,7 +96,11 @@ public final class PlayerStats extends JavaPlugin {
             }
         }
     }
-//Custom command
+
+    private void recordTimePlayed(UUID uniqueId) {
+    }
+
+    //Custom command
     @Override
     public boolean onCommand(@NotNull CommandSender sender, Command cmd, @NotNull String label, String[] args) {
         if (cmd.getName().equalsIgnoreCase("db-save")) {
@@ -115,7 +119,7 @@ public final class PlayerStats extends JavaPlugin {
             //DB connection
             Class.forName("com.mysql.cj.jdbc.Driver");
             String password = "password";
-            String username = "root";
+            String username = "admin";
             String database = "minecraft";
             int port = 3306;
             String host = "localhost";
@@ -167,33 +171,35 @@ public final class PlayerStats extends JavaPlugin {
 
     public void recordStat(UUID playerUUID, String username, String statColumn, int value) throws SQLException, ClassNotFoundException {
         try (Connection connection = openConnection()) {
-            String query = "INSERT INTO player_stats (uuid, username, " + statColumn + ") " +
-                    "VALUES (?, ?, ?) " +
-                    "ON DUPLICATE KEY UPDATE " + statColumn + " = " + statColumn + " + ?;";
-            PreparedStatement stmt = connection.prepareStatement(query);
-            stmt.setString(1, playerUUID.toString());
-            stmt.setString(2, username);
-            stmt.setInt(3, value);
-            stmt.setInt(4, value);
-            stmt.executeUpdate();
+            if (statColumn.equals("first_join")) {
+                // Handle first_join separately with a valid TIMESTAMP value
+                String query = "INSERT INTO player_stats (uuid, username, first_join) " +
+                        "VALUES (?, ?, CURRENT_TIMESTAMP) " +
+                        "ON DUPLICATE KEY UPDATE first_join = CURRENT_TIMESTAMP;";
+                PreparedStatement stmt = connection.prepareStatement(query);
+                stmt.setString(1, playerUUID.toString());
+                stmt.setString(2, username);
+                stmt.executeUpdate();
+            } else {
+                // Handle other columns as usual
+                String query = "INSERT INTO player_stats (uuid, username, " + statColumn + ") " +
+                        "VALUES (?, ?, ?) " +
+                        "ON DUPLICATE KEY UPDATE " + statColumn + " = " + statColumn + " + ?;";
+                PreparedStatement stmt = connection.prepareStatement(query);
+                stmt.setString(1, playerUUID.toString());
+                stmt.setString(2, username);
+                stmt.setInt(3, value);
+                stmt.setInt(4, value);
+                stmt.executeUpdate();
+            }
         }
     }
 
-    public void recordTimePlayed(UUID playerUUID) throws SQLException, ClassNotFoundException {
-        Instant joinTime = playerJoinTimes.get(playerUUID);
-        if (joinTime != null) {
-            long secondsPlayed = Instant.now().getEpochSecond() - joinTime.getEpochSecond();
-            getLogger().info("Time played by " + playerUUID + ": " + secondsPlayed + " seconds");
-            try (Connection connection = openConnection()) {
-                String query = "UPDATE player_stats SET time_played = time_played + ? WHERE uuid = ?;";
-                PreparedStatement stmt = connection.prepareStatement(query);
-                stmt.setLong(1, secondsPlayed);
-                stmt.setString(2, playerUUID.toString());
-                stmt.executeUpdate();
-            }
-        } else {
-            getLogger().warning("No join time found for: " + playerUUID);
-        }
+
+
+
+
+    private void addNewPlayerToDatabase(UUID playerUUID, String name) {
     }
 
     public void recordLogoutTime(UUID playerUUID) throws SQLException, ClassNotFoundException {
@@ -241,44 +247,81 @@ public final class PlayerStats extends JavaPlugin {
             this.plugin = plugin;
         }
 
+
         @EventHandler
         public void onPlayerJoin(PlayerJoinEvent event) {
             Player player = event.getPlayer();
             UUID playerUUID = player.getUniqueId();
-            if (!playerJoinTimes.containsKey(playerUUID)) {
-                playerJoinTimes.put(playerUUID, Instant.now());
+
+            int maxRetries = 3;
+            int retries = 0;
+
+            while (retries < maxRetries) {
                 try {
-                    recordStat(playerUUID, player.getName(), "first_join", 1);
-                    // Add a new player to the database when they join
-                    addNewPlayerToDatabase(playerUUID, player.getName());
+                    if (!playerJoinTimes.containsKey(playerUUID)) {
+                        playerJoinTimes.put(playerUUID, Instant.now());
+                        // Record time played and other relevant stats
+                        recordTimePlayed(playerUUID);
+                        recordStat(playerUUID, player.getName(), "first_join", 1);
+
+                        // Add a new player to the database when they join
+                        addNewPlayerToDatabase(playerUUID, player.getName());
+
+                        // Break out of the loop if successful
+                        break;
+                    }
                 } catch (SQLException | ClassNotFoundException e) {
                     getLogger().severe("Exception: " + e.getMessage());
+
+                    // Increment the retry count and log a warning
+                    retries++;
+                    getLogger().warning("Retrying attempt " + retries + " to record time played for " + player.getName());
                 }
             }
         }
 
+
+
         @EventHandler
         public void onPlayerQuit(PlayerQuitEvent event) {
             UUID playerUUID = event.getPlayer().getUniqueId();
-            try {
-                recordTimePlayed(playerUUID);
-                recordLogoutTime(playerUUID);
-                // Update the last logout time when players quit
-            } catch (SQLException | ClassNotFoundException e) {
-                getLogger().severe("Exception: " + e.getMessage());
+
+            // Check if the player has a join time recorded
+            if (playerJoinTimes.containsKey(playerUUID)) {
+                try {
+                    recordTimePlayed(playerUUID);
+                    recordLogoutTime(playerUUID);
+                    // Update the last logout time when players quit
+                } catch (SQLException | ClassNotFoundException e) {
+                    getLogger().severe("Exception: " + e.getMessage());
+                }
+
+                // Remove the player's join time
+                playerJoinTimes.remove(playerUUID);
+            } else {
+                getLogger().warning("No join time found for: " + playerUUID);
             }
-            playerJoinTimes.remove(playerUUID);
         }
 
-        private void addNewPlayerToDatabase(UUID playerUUID, String playerName) throws SQLException, ClassNotFoundException {
-            try (Connection connection = openConnection()) {
-                String insertQuery = "INSERT INTO player_stats (uuid, username) VALUES (?, ?);";
-                PreparedStatement stmt = connection.prepareStatement(insertQuery);
-                stmt.setString(1, playerUUID.toString());
-                stmt.setString(2, playerName);
-                stmt.executeUpdate();
+
+        public void recordTimePlayed(UUID playerUUID) throws SQLException, ClassNotFoundException {
+            Instant joinTime = playerJoinTimes.get(playerUUID);
+            if (joinTime != null) {
+                long secondsPlayed = Instant.now().getEpochSecond() - joinTime.getEpochSecond();
+                getLogger().info("Time played by " + playerUUID + ": " + secondsPlayed + " seconds");
+                try (Connection connection = openConnection()) {
+                    String query = "UPDATE player_stats SET time_played = time_played + ? WHERE uuid = ?;";
+                    PreparedStatement stmt = connection.prepareStatement(query);
+                    stmt.setLong(1, secondsPlayed);
+                    stmt.setString(2, playerUUID.toString());
+                    stmt.executeUpdate();
+                }
+            } else {
+                getLogger().warning("No join time found for: " + playerUUID);
             }
         }
+
+
 
         @EventHandler
         public void onPlayerDeath(PlayerDeathEvent event) {
